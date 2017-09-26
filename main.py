@@ -1,69 +1,53 @@
-from __future__ import division
 import gym
-import numpy as np
 import gc
 from config import load_config
+from modules import DDPG
+import numpy as np
 
-import train
-import buffer
 
+cf = load_config('config/baseline.py')
 env = gym.make('BipedalWalker-v2')
-# env = gym.make('Pendulum-v0')
 
-MAX_EPISODES = 5000
-MAX_STEPS = 1000
-MAX_BUFFER = 1000000
-MAX_TOTAL_REWARD = 300
-S_DIM = env.observation_space.shape[0]
-A_DIM = env.action_space.shape[0]
-A_MAX = env.action_space.high[0]
+cf.state_dim = env.observation_space.shape[0]
+cf.action_dim = env.action_space.shape[0]
 
-print ' State Dimensions :- ', S_DIM
-print ' Action Dimensions :- ', A_DIM
-print ' Action Max :- ', A_MAX
+print ' State Dimensions :- ', cf.state_dim
+print ' Action Dimensions :- ', cf.action_dim
 
-for epi in range(MAX_EPISODES):
-    observation = env.reset()
-    print 'EPISODE :- ', _ep
-    for r in range(MAX_STEPS):
+model = DDPG(cf)
+model.load_models()
+
+losses = []
+model.noise.reset()
+for epi in range(cf.max_episodes):
+    s_t = env.reset().astype('float32')
+    print 'EPISODE :- ', epi
+    for r in range(cf.max_steps):
         env.render()
-        state = np.float32(observation)
-
-        action = trainer.get_exploration_action(state)
-        # if _ep%5 == 0:
-        #   # validate every 5th episode
-        #   action = trainer.get_exploitation_action(state)
-        # else:
-        #   # get action based on observation, use exploration policy here
-        #   action = trainer.get_exploration_action(state)
-
-        new_observation, reward, done, info = env.step(action)
-
-        # # dont update if this is validation
-        # if _ep%50 == 0 or _ep>450:
-        #   continue
+        a_t = model.sample_action(s_t, epi % 10 == 0).flatten()
+        s_tp1, r_t, done, info = env.step(a_t)
 
         if done:
             new_state = None
         else:
-            new_state = np.float32(new_observation)
-            # push this exp in ram
-            ram.add(state, action, reward, new_state)
+            s_tp1 = s_tp1.astype('float32')
+            r_t = r_t.astype('float32')
+            a_t = a_t.astype('float32')
+            model.buffer.add(s_t, a_t, r_t, s_tp1)
 
-        observation = new_observation
-
-        # perform optimization
-        trainer.optimize()
+        s_t = s_tp1
+        _loss_c, _loss_a = model.train_batch()
+        losses.append([_loss_c.cpu().data.tolist()[0],
+                      _loss_a.cpu().data.tolist()[0]])
         if done:
             break
 
-    # check memory consumption and clear memory
     gc.collect()
-    # process = psutil.Process(os.getpid())
-    # print(process.memory_info().rss)
 
-    if _ep%100 == 0:
-        trainer.save_models(_ep)
+    print "Episode {}: actor loss: {} critic loss: {}".format(
+        epi, np.mean(np.asarray(losses), 0)[1],
+        np.mean(np.asarray(losses), 0)[0])
 
+    model.save_models()
 
 print 'Completed episodes'

@@ -1,8 +1,56 @@
 import torch
+from torch.autograd import Variable
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from memory import ReplayBuffer
+import numpy as np
+from collections import deque
+import random
+
+
+class ReplayBuffer:
+
+    def __init__(self, cf):
+        self.buffer_size = cf.max_buffer
+        self.len = 0
+
+        # Create buffers for (s_t, a_t, r_t, s_t+1)
+        self.buffer = deque(maxlen=self.buffer_size)
+
+    def sample(self, count):
+        count = min(count, self.len)
+        batch = random.sample(self.buffer, count)
+
+        s_t, a_t, r_t, s_tp1 = zip(*batch)
+        s_t = Variable(torch.from_numpy(np.asarray(s_t))).cuda()
+        a_t = Variable(torch.from_numpy(np.asarray(a_t))).cuda()
+        r_t = Variable(torch.from_numpy(np.asarray(r_t))).cuda()
+        s_tp1 = Variable(torch.from_numpy(np.asarray(s_tp1))).cuda()
+
+        return s_t, a_t, r_t, s_tp1
+
+    def add(self, s_t, a_t, r_t, s_tp1):
+        transition = (s_t, a_t, r_t, s_tp1)
+        self.len += 1
+        if self.len > self.buffer_size:
+            self.len = self.buffer_size
+        self.buffer.append(transition)
+
+
+class OrnsteinUhlenbeckNoise():
+    def __init__(self, cf):
+        self.action_dim = cf.action_dim
+        self.mu = cf.mu
+        self.theta = cf.theta
+        self.sigma = cf.sigma
+        self.X = np.ones(self.action_dim) * self.mu
+
+    def reset(self):
+        self.X = np.ones(self.action_dim) * self.mu
+
+    def sample(self):
+        self.X += self.theta * (self.mu - self.X) + self.sigma * np.random.randn(self.action_dim)
+        return self.X
 
 
 class Actor(nn.Module):
@@ -11,6 +59,9 @@ class Actor(nn.Module):
         self.model = nn.Sequential(
             nn.Linear(cf.state_dim, 256),
             nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.BatchNorm1d(128),
             nn.ReLU(),
             nn.Linear(128, 64),
             nn.BatchNorm1d(64),
@@ -33,7 +84,7 @@ class Critic(nn.Module):
             )
 
         self.transform_action = nn.Sequential(
-            nn.Linear(cf.state_dim, 128),
+            nn.Linear(cf.action_dim, 128),
             nn.BatchNorm1d(128),
             nn.ReLU()
             )
@@ -60,14 +111,15 @@ class DDPG(nn.Module):
         self.actor = Actor(cf).cuda()
         self.actor_optimizer = optim.Adam(self.actor.parameters(),
                                           cf.learning_rate)
-        self.target_actor = Actor(cf).cuda()
+        self.actor_target = Actor(cf).cuda()
 
         self.critic = Critic(cf).cuda()
-        self.actor_optimizer = optim.Adam(self.actor.parameters(),
-                                          cf.learning_rate)
-        self.target_critic = Critic(cf).cuda()
+        self.critic_optimizer = optim.Adam(self.critic.parameters(),
+                                           cf.learning_rate)
+        self.critic_target = Critic(cf).cuda()
 
-        self.buffer = ReplayBuffer(cf).cuda()
+        self.buffer = ReplayBuffer(cf)
+        self.noise = OrnsteinUhlenbeckNoise(cf)
 
     def update_targets(self):
         for actor, actor_target in zip(self.actor.parameters(),
@@ -82,25 +134,44 @@ class DDPG(nn.Module):
                 self.cf.tau*critic.data + (1-self.cf.tau)*critic_target.data
                 )
 
+    def sample_action(self, state, explore=True):
+        state = Variable(torch.from_numpy(state)).cuda()
+        action = self.actor(state[None]).cpu().data.numpy()
+        if explore:
+            action = action + self.noise.sample()
+        return action
+
     def train_batch(self):
         s_t, a_t, r_t, s_tp1 = self.buffer.sample(self.cf.batch_size)
 
         # The below 2 operations need to be detached since we only
         # update critic and not targets
-        a_tp1 = self.target_actor(s_tp1).detach()
-        q_value = self.target_critic(s_tp1, a_tp1).detach()
+        a_tp1 = self.actor_target(s_tp1).detach()
+        q_value = self.critic_target(s_tp1, a_tp1).squeeze().detach()
         y_target = r_t + self.cf.gamma*q_value
-        y_predicted = self.critic(s_t, a_t)
+        y_predicted = self.critic(s_t, a_t).squeeze()
 
         critic_loss = F.smooth_l1_loss(y_predicted, y_target)
+        self.critic_optimizer.zero_grad()
         critic_loss.backward()
         self.critic_optimizer.step()
 
         a_t_pred = self.actor(s_t)
         q_pred = self.critic(s_t, a_t_pred)
         actor_loss = -1*torch.sum(q_pred)  # because we want to maximize q_pred
+        self.actor_optimizer.zero_grad()
         actor_loss.backward()
         self.actor_optimizer.step()
 
         self.update_targets()
         return critic_loss, actor_loss
+
+    def save_models(self):
+        torch.save(self.actor_target.state_dict(), 'models/best_actor.model')
+        torch.save(self.critic_target.state_dict(), 'models/best_critic.model')
+
+    def load_models(self):
+        self.actor_target.load_state_dict(
+            torch.load('models/best_actor.model'))
+        self.critic_target.load_state_dict(
+            torch.load('models/best_critic.model'))

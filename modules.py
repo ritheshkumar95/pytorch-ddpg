@@ -58,17 +58,19 @@ class Actor(nn.Module):
         super(Actor, self).__init__()
         self.model = nn.Sequential(
             nn.Linear(cf.state_dim, 256),
-            nn.BatchNorm1d(256),
             nn.ReLU(),
             nn.Linear(256, 128),
-            nn.BatchNorm1d(128),
             nn.ReLU(),
             nn.Linear(128, 64),
-            nn.BatchNorm1d(64),
             nn.ReLU(),
             nn.Linear(64, cf.action_dim),
             nn.Tanh()
             )
+
+        for i in [0, 2, 4]:
+            nn.init.xavier_uniform(self.model[i].weight.data)
+
+        self.model[-2].weight.data.uniform_(-3e-3, 3e-3)
 
     def forward(self, state):
         return self.model(state)
@@ -79,22 +81,23 @@ class Critic(nn.Module):
         super(Critic, self).__init__()
         self.transform_state = nn.Sequential(
             nn.Linear(cf.state_dim, 128),
-            nn.BatchNorm1d(128),
             nn.ReLU()
             )
+        nn.init.xavier_uniform(self.transform_state[0].weight.data)
 
         self.transform_action = nn.Sequential(
             nn.Linear(cf.action_dim, 128),
-            nn.BatchNorm1d(128),
             nn.ReLU()
             )
+        nn.init.xavier_uniform(self.transform_action[0].weight.data)
 
         self.transform_both = nn.Sequential(
             nn.Linear(256, 128),
-            nn.BatchNorm1d(128),
             nn.ReLU(),
             nn.Linear(128, 1)
             )
+        nn.init.xavier_uniform(self.transform_both[0].weight.data)
+        self.transform_both[-1].weight.data.uniform_(-3e-3, 3e-3)
 
     def forward(self, state, action):
         state = self.transform_state(state)
@@ -110,12 +113,12 @@ class DDPG(nn.Module):
 
         self.actor = Actor(cf).cuda()
         self.actor_optimizer = optim.Adam(self.actor.parameters(),
-                                          cf.learning_rate)
+                                          cf.actor_learning_rate)
         self.actor_target = Actor(cf).cuda()
 
         self.critic = Critic(cf).cuda()
         self.critic_optimizer = optim.Adam(self.critic.parameters(),
-                                           cf.learning_rate)
+                                           cf.critic_learning_rate)
         self.critic_target = Critic(cf).cuda()
 
         self.buffer = ReplayBuffer(cf)
@@ -132,6 +135,19 @@ class DDPG(nn.Module):
                                          self.critic_target.parameters()):
             critic_target.data.copy_(
                 self.cf.tau*critic.data + (1-self.cf.tau)*critic_target.data
+                )
+
+    def copy_weights(self):
+        for actor, actor_target in zip(self.actor.parameters(),
+                                       self.actor_target.parameters()):
+            actor_target.data.copy_(
+                actor.data
+                )
+
+        for critic, critic_target in zip(self.critic.parameters(),
+                                         self.critic_target.parameters()):
+            critic_target.data.copy_(
+                critic.data
                 )
 
     def sample_action(self, state, explore=True):

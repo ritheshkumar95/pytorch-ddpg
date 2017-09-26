@@ -16,6 +16,7 @@ print ' Action Dimensions :- ', cf.action_dim
 
 model = DDPG(cf)
 model.load_models()
+model.copy_weights()
 
 losses = []
 model.noise.reset()

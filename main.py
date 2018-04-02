@@ -1,54 +1,62 @@
 import gym
-import gc
 from config import load_config
-from modules import DDPG
+from modules import DDPG, OrnsteinUhlenbeckNoise, to_scalar
 import numpy as np
+from itertools import count
 
 
 cf = load_config('config/baseline.py')
+# env = gym.make('HalfCheetah-v2')
 env = gym.make('BipedalWalker-v2')
 
 cf.state_dim = env.observation_space.shape[0]
 cf.action_dim = env.action_space.shape[0]
+cf.scale = float(env.action_space.high[0])
 
-print ' State Dimensions :- ', cf.state_dim
-print ' Action Dimensions :- ', cf.action_dim
+print('Trying environment BipedalWalker-v2')
+print(' State Dimensions: ', cf.state_dim)
+print(' Action Dimensions: ', cf.action_dim)
+print('Action low: ', env.action_space.low)
+print('Action high: ', env.action_space.high)
 
+noise_process = OrnsteinUhlenbeckNoise(cf)
 model = DDPG(cf)
-model.load_models()
-model.copy_weights()
+model.copy_weights(model.actor, model.actor_target)
+model.copy_weights(model.critic, model.critic_target)
 
 losses = []
-model.noise.reset()
+total_timesteps = 0
 for epi in range(cf.max_episodes):
-    s_t = env.reset().astype('float32')
-    print 'EPISODE :- ', epi
-    for r in range(cf.max_steps):
-        env.render()
-        a_t = model.sample_action(s_t, epi % 10 == 0).flatten()
+    s_t = env.reset()
+    noise_process.reset()
+    avg_reward = 0
+    for t in count(1):
+        a_t = model.sample_action(s_t)
+        a_t = a_t + noise_process.sample()
+
         s_tp1, r_t, done, info = env.step(a_t)
 
-        if done:
-            new_state = None
-        else:
-            s_tp1 = s_tp1.astype('float32')
-            r_t = r_t.astype('float32')
-            a_t = a_t.astype('float32')
-            model.buffer.add(s_t, a_t, r_t, s_tp1)
+        model.buffer.add(s_t, a_t, r_t, s_tp1, float(done == False))
+        avg_reward += r_t
 
-        s_t = s_tp1
-        _loss_c, _loss_a = model.train_batch()
-        losses.append([_loss_c.cpu().data.tolist()[0],
-                      _loss_a.cpu().data.tolist()[0]])
         if done:
             break
+        else:
+            s_t = s_tp1
 
-    gc.collect()
+        if model.buffer.len >= cf.replay_start_size:
+            _loss_a, _loss_c = model.train_batch()
+            losses.append(to_scalar([_loss_a, _loss_c]))
 
-    print "Episode {}: actor loss: {} critic loss: {}".format(
-        epi, np.mean(np.asarray(losses), 0)[1],
-        np.mean(np.asarray(losses), 0)[0])
+    if len(losses) > 0:
+        total_timesteps += t
+        avg_loss_a, avg_loss_c = np.asarray(losses)[-100:].mean(0)
+        print(
+            'Episode {}: actor loss: {} critic loss: {}\
+            total_reward: {} timesteps: {} tot_timesteps: {}'.format(
+             epi, avg_loss_a, avg_loss_c, avg_reward, t, total_timesteps
+            ))
 
-    model.save_models()
-
-print 'Completed episodes'
+    if (epi + 1) % 200 == 0:
+        model.save_models()
+print('Completed training!')
